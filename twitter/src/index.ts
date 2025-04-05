@@ -57,31 +57,69 @@ export const replyTweet = async function (
   const replyTweets = replyTweetsResponse.tweets;
   console.log("Số tweet fetch được:", replyTweets.length);
 
+  // Lấy danh sách ConversationID của các tweet mới
+  const allConversationIds = replyTweets
+    .filter((tweet: any) => tweet.conversationId)
+    .map((tweet: any) => String(tweet.conversationId));
+
+  console.log("ConversationIDs của các tweet mới nhận:", allConversationIds);
+
   // Đọc danh sách tweets đã reply từ file nếu tồn tại
   let repliedTweets: any[] = [];
+  let repliedConversationIds: string[] = [];
+
   if (fs.existsSync("replied.json")) {
     try {
       const data = fs.readFileSync("replied.json", "utf-8");
       repliedTweets = JSON.parse(data);
+
+      // Lấy tất cả conversationId đã xử lý
+      repliedConversationIds = repliedTweets
+        .filter((tweet: any) => tweet.conversationId)
+        .map((tweet: any) => String(tweet.conversationId));
+
       console.log(
         "Đã đọc file replied.json, có",
         repliedTweets.length,
         "tweet đã reply"
       );
+      console.log("ConversationIDs đã xử lý:", repliedConversationIds);
     } catch (error) {
       console.error("Lỗi khi đọc file replied.json:", error);
       repliedTweets = [];
+      repliedConversationIds = [];
     }
   } else {
     console.log("Không tìm thấy file replied.json, tạo mới");
   }
 
-  // Lọc tweet chưa được reply
-  const repliedIds = repliedTweets.map((tweet: any) => tweet.id);
-  const toReply = replyTweets.filter(
-    (tweet: any) => !repliedIds.includes(tweet.id)
+  // Tạo file replied_ids.json để dễ debug
+  fs.writeFileSync(
+    "replied_ids.json",
+    JSON.stringify(
+      {
+        new_conversations: allConversationIds,
+        replied_conversations: repliedConversationIds,
+      },
+      null,
+      2
+    )
   );
-  console.log("Số tweet chưa reply:", toReply.length);
+
+  // Lọc tweet thuộc cuộc hội thoại chưa được xử lý
+  const toReply = replyTweets.filter((tweet: any) => {
+    // Chỉ xử lý tweet thuộc cuộc hội thoại có conversationId và chưa được xử lý
+    return (
+      tweet.conversationId &&
+      !repliedConversationIds.includes(String(tweet.conversationId))
+    );
+  });
+
+  console.log("Số tweet thuộc cuộc hội thoại chưa xử lý:", toReply.length);
+
+  // Biến để theo dõi xem đã xử lý tweet mới nào chưa
+  let repliedNewTweet = false;
+  let repliedTweetInfo = null;
 
   // Chỉ xử lý tweet mới nhất (đầu tiên trong danh sách)
   if (toReply.length > 0) {
@@ -120,6 +158,13 @@ export const replyTweet = async function (
         const response = await scraper.sendTweet(contentToReply, replyID);
         console.log("Đã reply tweet id:", replyID);
 
+        // Đánh dấu là đã reply một tweet mới
+        repliedNewTweet = true;
+        repliedTweetInfo = {
+          id: replyID,
+          conversationId: targetId,
+        };
+
         // Thêm tweet vào danh sách đã reply cùng với timestamp
         const repliedTweet = {
           ...tweet,
@@ -139,10 +184,10 @@ export const replyTweet = async function (
       }
     }
   } else {
-    console.log("Không có tweet mới để reply.");
+    console.log("Không có cuộc hội thoại mới để reply.");
   }
 
-  return replyTweets;
+  return { tweets: replyTweets, repliedNewTweet, repliedTweetInfo };
 };
 
 // Hàm kiểm tra retweet
@@ -244,9 +289,75 @@ async function replyToRetweeters(
     "https://anhquan.io",
   ];
 
-  for (const tweetUser of tweetUsers) {
+  // Tạo file để lưu các user bị lỗi khi reply
+  const failedReplies: Array<{
+    username: string;
+    tweetId: string;
+    reason: string;
+    timestamp: string;
+  }> = [];
+
+  // Đọc file failed_replies.json nếu tồn tại
+  if (fs.existsSync("failed_replies.json")) {
     try {
-      const { username, tweetId: userTweetId } = tweetUser;
+      const data = fs.readFileSync("failed_replies.json", "utf-8");
+      const existingFailures = JSON.parse(data);
+      if (Array.isArray(existingFailures)) {
+        failedReplies.push(...existingFailures);
+      }
+    } catch (error) {
+      console.error("Lỗi khi đọc file failed_replies.json:", error);
+    }
+  }
+
+  // Đọc danh sách users đã được reply từ file
+  let repliedUsers: string[] = [];
+  if (fs.existsSync("replied_users.json")) {
+    try {
+      const data = fs.readFileSync("replied_users.json", "utf-8");
+      const repliedUsersData = JSON.parse(data);
+      if (Array.isArray(repliedUsersData)) {
+        repliedUsers = repliedUsersData;
+      } else if (
+        repliedUsersData.users &&
+        Array.isArray(repliedUsersData.users)
+      ) {
+        repliedUsers = repliedUsersData.users;
+      }
+      console.log("Danh sách users đã reply:", repliedUsers);
+    } catch (error) {
+      console.error("Lỗi khi đọc file replied_users.json:", error);
+    }
+  } else {
+    console.log("Không tìm thấy file replied_users.json, tạo mới");
+    fs.writeFileSync(
+      "replied_users.json",
+      JSON.stringify({ users: [] }, null, 2)
+    );
+  }
+
+  // Lọc ra danh sách các username độc nhất để tránh xử lý trùng lặp
+  const uniqueUsers = Array.from(
+    new Set(tweetUsers.map((user) => user.username))
+  );
+  console.log("Số lượng users độc nhất cần kiểm tra:", uniqueUsers.length);
+
+  // Nhóm tweet theo username để dễ xử lý
+  const userTweets: { [username: string]: string[] } = {};
+  tweetUsers.forEach(({ username, tweetId }) => {
+    if (!userTweets[username]) {
+      userTweets[username] = [];
+    }
+    userTweets[username].push(tweetId);
+  });
+
+  for (const username of uniqueUsers) {
+    try {
+      // Bỏ qua nếu user đã được reply trước đó
+      if (repliedUsers.includes(username)) {
+        console.log(`@${username} đã được reply trước đó, bỏ qua.`);
+        continue;
+      }
 
       // Kiểm tra xem người dùng đã retweet chưa
       const retweetCheck = await checkRetweet(username, tweetId);
@@ -269,15 +380,83 @@ async function replyToRetweeters(
         // Tạo biến thể message
         const message = variateMessage(`airdrop link: ${uniqueUrl}`);
 
+        // Lấy tweet id của user - chỉ lấy tweet đầu tiên nếu có nhiều tweet
+        const userTweetId = userTweets[username][0];
+
         // Thời gian chờ ngẫu nhiên trước khi gửi reply
         await randomSleep(3000, 10000);
 
-        // Reply với message đã biến thể
-        await scraper.sendTweet(message, userTweetId);
+        try {
+          // Reply với message đã biến thể
+          await scraper.sendTweet(message, userTweetId);
+          console.log(
+            `Đã reply "${message}" đến @${username} (tweet ID: ${userTweetId})`
+          );
 
-        console.log(
-          `Đã reply "${message}" đến @${username} (tweet ID: ${userTweetId})`
-        );
+          // Thêm username vào danh sách đã reply
+          repliedUsers.push(username);
+          fs.writeFileSync(
+            "replied_users.json",
+            JSON.stringify(
+              {
+                users: repliedUsers,
+                last_updated: new Date().toISOString(),
+              },
+              null,
+              2
+            )
+          );
+          console.log(`Đã thêm @${username} vào danh sách đã reply`);
+        } catch (replyError: any) {
+          // Lưu lại thông tin user bị lỗi khi reply (có thể do spam)
+          console.error(`Lỗi khi reply đến @${username}:`, replyError);
+
+          failedReplies.push({
+            username: username,
+            tweetId: userTweetId,
+            reason: replyError.message || "Unknown error",
+            timestamp: new Date().toISOString(),
+          });
+
+          // Lưu danh sách các reply bị lỗi vào file
+          fs.writeFileSync(
+            "failed_replies.json",
+            JSON.stringify(failedReplies, null, 2)
+          );
+          console.log(
+            `Đã lưu thông tin lỗi reply của @${username} vào failed_replies.json`
+          );
+
+          // Thử phương pháp khác nếu có lỗi (có thể là do spam)
+          try {
+            console.log(`Thử phương pháp khác cho @${username}...`);
+            // Tạo một phiên bản tweet khác để thử lại
+            const alternativeMessage = `Hey @${username}, check this out: ${uniqueUrl}`;
+            await scraper.sendTweet(alternativeMessage, userTweetId);
+            console.log(
+              `Đã reply thành công với phương pháp thay thế cho @${username}`
+            );
+
+            // Thêm username vào danh sách đã reply nếu thành công
+            repliedUsers.push(username);
+            fs.writeFileSync(
+              "replied_users.json",
+              JSON.stringify(
+                {
+                  users: repliedUsers,
+                  last_updated: new Date().toISOString(),
+                },
+                null,
+                2
+              )
+            );
+          } catch (altError) {
+            console.error(
+              `Không thể reply cho @${username} ngay cả với phương pháp thay thế:`,
+              altError
+            );
+          }
+        }
       } else {
         console.log(`@${username} chưa retweet, bỏ qua.`);
       }
@@ -407,18 +586,19 @@ async function main() {
 
   // Reply tweet và lấy kết quả trả về
   console.log("Đang chạy replyTweet...");
-  const replyTweets = await replyTweet(genAI, scraper, username);
+  const result = await replyTweet(genAI, scraper, username);
+  const replyTweets = result.tweets;
 
-  // Lấy tweet_id và gọi API get tweet detail
-  if (replyTweets.length > 0) {
-    // Lấy ID của tweet đầu tiên và conversation ID
-    const firstTweetId = replyTweets[0].id;
-    const conversationId = replyTweets[0].conversationId;
+  // Chỉ kiểm tra tweet thread và retweet nếu đã reply một tweet mới
+  if (result.repliedNewTweet && result.repliedTweetInfo) {
+    console.log("Đã reply tweet mới, tiếp tục kiểm tra retweet...");
 
-    console.log("ID của tweet đầu tiên:", firstTweetId);
-    console.log("ConversationId của tweet đầu tiên:", conversationId);
+    // Lấy thông tin từ tweet đã reply
+    const conversationId = result.repliedTweetInfo.conversationId;
 
     if (conversationId) {
+      console.log("Xử lý conversationId:", conversationId);
+
       // Lấy tweet gốc từ conversationId
       const originalTweet = await scraper.getTweet(conversationId);
 
@@ -427,21 +607,17 @@ async function main() {
         // Sử dụng ID của tweet gốc để lấy thread
         await getTweetDetail(originalTweet.id);
       } else {
-        console.log(
-          "Không thể lấy thông tin tweet gốc. Sử dụng conversation ID..."
-        );
+        console.log("Sử dụng conversation ID để lấy thread...");
         await getTweetDetail(conversationId);
       }
-    } else if (firstTweetId) {
-      console.log(
-        "Tweet đầu tiên không có conversationId. Sử dụng tweet ID..."
-      );
-      await getTweetDetail(firstTweetId);
     } else {
-      console.log("Không thể xác định ID để lấy chi tiết tweet.");
+      console.log("Không có conversationId, bỏ qua kiểm tra retweet.");
     }
+  } else if (replyTweets.length > 0) {
+    // Không có tweet mới nào được reply, nhưng vẫn có tweets
+    console.log("Không có tweet mới nào được reply, bỏ qua kiểm tra retweet.");
   } else {
-    console.log("Không có tweet nào để reply.");
+    console.log("Không có tweet nào để xử lý.");
   }
 }
 
