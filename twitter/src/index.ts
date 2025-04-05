@@ -57,29 +57,36 @@ export const replyTweet = async function (
   const replyTweets = replyTweetsResponse.tweets;
   console.log("Số tweet fetch được:", replyTweets.length);
 
-  // Lọc tweet chưa được reply
-  let toReply = replyTweets;
+  // Đọc danh sách tweets đã reply từ file nếu tồn tại
+  let repliedTweets: any[] = [];
   if (fs.existsSync("replied.json")) {
-    const data = fs.readFileSync("replied.json", "utf-8");
-    const replied = JSON.parse(data);
-    toReply = replyTweets.filter(
-      (tweet: any) => !replied.some((item: any) => item.id === tweet.id)
-    );
-    console.log(
-      "Đã tìm file replied.json, số tweet chưa reply:",
-      toReply.length
-    );
+    try {
+      const data = fs.readFileSync("replied.json", "utf-8");
+      repliedTweets = JSON.parse(data);
+      console.log(
+        "Đã đọc file replied.json, có",
+        repliedTweets.length,
+        "tweet đã reply"
+      );
+    } catch (error) {
+      console.error("Lỗi khi đọc file replied.json:", error);
+      repliedTweets = [];
+    }
   } else {
-    console.log(
-      "Không tìm thấy file replied.json, dùng tất cả tweet fetch được"
-    );
-    toReply = replyTweets;
+    console.log("Không tìm thấy file replied.json, tạo mới");
   }
+
+  // Lọc tweet chưa được reply
+  const repliedIds = repliedTweets.map((tweet: any) => tweet.id);
+  const toReply = replyTweets.filter(
+    (tweet: any) => !repliedIds.includes(tweet.id)
+  );
+  console.log("Số tweet chưa reply:", toReply.length);
 
   // Chỉ xử lý tweet mới nhất (đầu tiên trong danh sách)
   if (toReply.length > 0) {
     const tweet = toReply[0]; // Chỉ lấy tweet đầu tiên
-    console.log("Chỉ xử lý tweet mới nhất:", tweet.id);
+    console.log("Đang xử lý tweet mới nhất:", tweet.id);
 
     const replyID = tweet.id;
     const tweetText = tweet.text || "";
@@ -112,16 +119,29 @@ export const replyTweet = async function (
 
         const response = await scraper.sendTweet(contentToReply, replyID);
         console.log("Đã reply tweet id:", replyID);
+
+        // Thêm tweet vào danh sách đã reply cùng với timestamp
+        const repliedTweet = {
+          ...tweet,
+          replied_at: new Date().toISOString(),
+          reply_content: contentToReply,
+        };
+        repliedTweets.push(repliedTweet);
+
+        // Lưu danh sách đã reply vào file
+        fs.writeFileSync(
+          "replied.json",
+          JSON.stringify(repliedTweets, null, 2)
+        );
+        console.log("Đã cập nhật file replied.json");
       } catch (error) {
         console.error("Lỗi khi reply tweet:", error);
       }
     }
   } else {
-    console.log("Không có tweet nào để reply.");
+    console.log("Không có tweet mới để reply.");
   }
 
-  // Lưu toàn bộ tweet đã fetch vào file replied.json
-  fs.writeFileSync("replied.json", JSON.stringify(replyTweets, null, 2));
   return replyTweets;
 };
 
