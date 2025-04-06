@@ -562,6 +562,21 @@ async function login(
 
 // Hàm main chạy cả 2 chức năng: reply tweet và lấy tweet detail
 async function main() {
+  // Kiểm tra tham số dòng lệnh có chế độ chỉ kiểm tra hay không
+  const isCheckOnly = process.argv.includes("--check-only");
+  if (isCheckOnly) {
+    console.log("Chạy ở chế độ chỉ kiểm tra (--check-only)");
+  }
+
+  // Kiểm tra xem có đang trong giờ nghỉ hay không (1-5 giờ sáng)
+  const currentHour = new Date().getHours();
+  if (currentHour >= 1 && currentHour <= 5) {
+    console.log(
+      `Đang trong giờ nghỉ (${currentHour} giờ sáng), bot sẽ nghỉ ngơi để tránh bị phát hiện là hoạt động tự động.`
+    );
+    return;
+  }
+
   // Khởi tạo instance cho genAI và scraper
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
   const scraper = new Scraper();
@@ -581,6 +596,13 @@ async function main() {
   const loggedIn = await login(scraper, username, password, email, fa);
   if (!loggedIn) {
     console.error("Không thể đăng nhập vào Twitter. Đang dừng chương trình...");
+    return;
+  }
+
+  // Nếu chỉ chạy ở chế độ kiểm tra, chỉ fetch tweets và kiểm tra xem có tweet mới không
+  if (isCheckOnly) {
+    console.log("Chế độ kiểm tra: Chỉ fetch tweets và cập nhật files");
+    await replyTweet(genAI, scraper, username);
     return;
   }
 
