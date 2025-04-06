@@ -282,14 +282,30 @@ async function replyToRetweeters(
 ) {
   console.log("\nBắt đầu reply cho những người đã retweet...");
 
-  // Tạo danh sách base URL cho link airdrop
   const baseUrls = [
     "https://anhquan.com",
     "https://anhquan.com/airdrop",
     "https://anhquan.io",
   ];
 
-  // Tạo file để lưu các user bị lỗi khi reply
+  // Load file replied_users.json theo conversationId
+  let repliedUsersMap: Record<string, string[]> = {};
+  const repliedUsersPath = "replied_users.json";
+
+  if (fs.existsSync(repliedUsersPath)) {
+    try {
+      const data = fs.readFileSync(repliedUsersPath, "utf-8");
+      repliedUsersMap = JSON.parse(data) || {};
+    } catch (error) {
+      console.error("Lỗi khi đọc file replied_users.json:", error);
+      repliedUsersMap = {};
+    }
+  } else {
+    console.log("Không tìm thấy file replied_users.json, tạo mới...");
+    repliedUsersMap = {};
+  }
+
+  // Load danh sách reply lỗi nếu có
   const failedReplies: Array<{
     username: string;
     tweetId: string;
@@ -297,7 +313,6 @@ async function replyToRetweeters(
     timestamp: string;
   }> = [];
 
-  // Đọc file failed_replies.json nếu tồn tại
   if (fs.existsSync("failed_replies.json")) {
     try {
       const data = fs.readFileSync("failed_replies.json", "utf-8");
@@ -310,162 +325,98 @@ async function replyToRetweeters(
     }
   }
 
-  // Đọc danh sách users đã được reply từ file
-  let repliedUsers: string[] = [];
-  if (fs.existsSync("replied_users.json")) {
-    try {
-      const data = fs.readFileSync("replied_users.json", "utf-8");
-      const repliedUsersData = JSON.parse(data);
-      if (Array.isArray(repliedUsersData)) {
-        repliedUsers = repliedUsersData;
-      } else if (
-        repliedUsersData.users &&
-        Array.isArray(repliedUsersData.users)
-      ) {
-        repliedUsers = repliedUsersData.users;
-      }
-      console.log("Danh sách users đã reply:", repliedUsers);
-    } catch (error) {
-      console.error("Lỗi khi đọc file replied_users.json:", error);
-    }
-  } else {
-    console.log("Không tìm thấy file replied_users.json, tạo mới");
-    fs.writeFileSync(
-      "replied_users.json",
-      JSON.stringify({ users: [] }, null, 2)
-    );
-  }
-
-  // Lọc ra danh sách các username độc nhất để tránh xử lý trùng lặp
-  const uniqueUsers = Array.from(
-    new Set(tweetUsers.map((user) => user.username))
-  );
+  // Lọc danh sách user duy nhất
+  const uniqueUsers = Array.from(new Set(tweetUsers.map((u) => u.username)));
   console.log("Số lượng users độc nhất cần kiểm tra:", uniqueUsers.length);
 
-  // Nhóm tweet theo username để dễ xử lý
+  // Nhóm tweet theo username
   const userTweets: { [username: string]: string[] } = {};
   tweetUsers.forEach(({ username, tweetId }) => {
-    if (!userTweets[username]) {
-      userTweets[username] = [];
-    }
+    if (!userTweets[username]) userTweets[username] = [];
     userTweets[username].push(tweetId);
   });
 
   for (const username of uniqueUsers) {
     try {
-      // Bỏ qua nếu user đã được reply trước đó
-      if (repliedUsers.includes(username)) {
-        console.log(`@${username} đã được reply trước đó, bỏ qua.`);
+      const alreadyReplied = repliedUsersMap[tweetId]?.includes(username);
+      if (alreadyReplied) {
+        console.log(
+          `@${username} đã được reply trong thread này (ID: ${tweetId}), bỏ qua.`
+        );
         continue;
       }
 
-      // Kiểm tra xem người dùng đã retweet chưa
       const retweetCheck = await checkRetweet(username, tweetId);
-
-      // Xử lý kết quả trả về có thể là bất kỳ kiểu dữ liệu nào
       const isRetweeted =
         retweetCheck && (retweetCheck as any).is_retweeted === true;
 
       if (isRetweeted) {
-        console.log(
-          `@${username} đã retweet! Đang reply trực tiếp vào tweet của họ...`
-        );
+        console.log(`@${username} đã retweet! Đang reply...`);
 
-        // Chọn ngẫu nhiên URL cơ sở và thêm tham số ngẫu nhiên để tránh trùng lặp
         const randomUrl = baseUrls[Math.floor(Math.random() * baseUrls.length)];
         const uniqueUrl = `${randomUrl}?ref=${Math.floor(
           Math.random() * 10000
         )}`;
-
-        // Tạo biến thể message
         const message = variateMessage(`airdrop link: ${uniqueUrl}`);
-
-        // Lấy tweet id của user - chỉ lấy tweet đầu tiên nếu có nhiều tweet
         const userTweetId = userTweets[username][0];
 
-        // Thời gian chờ ngẫu nhiên trước khi gửi reply
         await randomSleep(3000, 10000);
 
         try {
-          // Reply với message đã biến thể
           await scraper.sendTweet(message, userTweetId);
           console.log(
-            `Đã reply "${message}" đến @${username} (tweet ID: ${userTweetId})`
+            `✅ Đã reply "${message}" đến @${username} (tweet ID: ${userTweetId})`
           );
 
-          // Thêm username vào danh sách đã reply
-          repliedUsers.push(username);
+          if (!repliedUsersMap[tweetId]) {
+            repliedUsersMap[tweetId] = [];
+          }
+          repliedUsersMap[tweetId].push(username);
+
           fs.writeFileSync(
-            "replied_users.json",
-            JSON.stringify(
-              {
-                users: repliedUsers,
-                last_updated: new Date().toISOString(),
-              },
-              null,
-              2
-            )
+            repliedUsersPath,
+            JSON.stringify(repliedUsersMap, null, 2)
           );
-          console.log(`Đã thêm @${username} vào danh sách đã reply`);
         } catch (replyError: any) {
-          // Lưu lại thông tin user bị lỗi khi reply (có thể do spam)
-          console.error(`Lỗi khi reply đến @${username}:`, replyError);
+          console.error(`❌ Lỗi khi reply đến @${username}:`, replyError);
 
           failedReplies.push({
-            username: username,
+            username,
             tweetId: userTweetId,
             reason: replyError.message || "Unknown error",
             timestamp: new Date().toISOString(),
           });
 
-          // Lưu danh sách các reply bị lỗi vào file
           fs.writeFileSync(
             "failed_replies.json",
             JSON.stringify(failedReplies, null, 2)
           );
-          console.log(
-            `Đã lưu thông tin lỗi reply của @${username} vào failed_replies.json`
-          );
 
-          // Thử phương pháp khác nếu có lỗi (có thể là do spam)
           try {
-            console.log(`Thử phương pháp khác cho @${username}...`);
-            // Tạo một phiên bản tweet khác để thử lại
-            const alternativeMessage = `Hey @${username}, check this out: ${uniqueUrl}`;
-            await scraper.sendTweet(alternativeMessage, userTweetId);
-            console.log(
-              `Đã reply thành công với phương pháp thay thế cho @${username}`
-            );
+            console.log(`Thử phương pháp thay thế cho @${username}...`);
+            const altMessage = `Hey @${username}, check this out: ${uniqueUrl}`;
+            await scraper.sendTweet(altMessage, userTweetId);
+            console.log(`✅ Thử lại thành công với alt message.`);
 
-            // Thêm username vào danh sách đã reply nếu thành công
-            repliedUsers.push(username);
+            if (!repliedUsersMap[tweetId]) {
+              repliedUsersMap[tweetId] = [];
+            }
+            repliedUsersMap[tweetId].push(username);
             fs.writeFileSync(
-              "replied_users.json",
-              JSON.stringify(
-                {
-                  users: repliedUsers,
-                  last_updated: new Date().toISOString(),
-                },
-                null,
-                2
-              )
+              repliedUsersPath,
+              JSON.stringify(repliedUsersMap, null, 2)
             );
           } catch (altError) {
-            console.error(
-              `Không thể reply cho @${username} ngay cả với phương pháp thay thế:`,
-              altError
-            );
+            console.error(`❌ Vẫn không thể reply cho @${username}:`, altError);
           }
         }
       } else {
         console.log(`@${username} chưa retweet, bỏ qua.`);
       }
 
-      // Thời gian chờ ngẫu nhiên dài hơn giữa các lần xử lý người dùng
       await randomSleep(8000, 20000);
     } catch (error) {
-      console.error(`Lỗi khi xử lý người dùng:`, error);
-      // Chờ thêm thời gian nếu gặp lỗi
+      console.error(`❌ Lỗi khi xử lý user @${username}:`, error);
       await randomSleep(15000, 30000);
     }
   }
@@ -560,89 +511,136 @@ async function login(
   }
 }
 
-// Hàm main chạy cả 2 chức năng: reply tweet và lấy tweet detail
-async function main() {
-  // Kiểm tra tham số dòng lệnh có chế độ chỉ kiểm tra hay không
-  const isCheckOnly = process.argv.includes("--check-only");
-  if (isCheckOnly) {
-    console.log("Chạy ở chế độ chỉ kiểm tra (--check-only)");
-  }
+// // Hàm main chạy cả 2 chức năng: reply tweet và lấy tweet detail
+// async function main() {
+//   // Kiểm tra xem có đang trong giờ nghỉ hay không (1-5 giờ sáng)
+//   const currentHour = new Date().getHours();
+//   if (currentHour >= 1 && currentHour <= 5) {
+//     console.log(
+//       `Đang trong giờ nghỉ (${currentHour} giờ sáng), bot sẽ nghỉ ngơi để tránh bị phát hiện là hoạt động tự động.`
+//     );
+//     return;
+//   }
 
-  // Kiểm tra xem có đang trong giờ nghỉ hay không (1-5 giờ sáng)
-  const currentHour = new Date().getHours();
-  if (currentHour >= 1 && currentHour <= 5) {
-    console.log(
-      `Đang trong giờ nghỉ (${currentHour} giờ sáng), bot sẽ nghỉ ngơi để tránh bị phát hiện là hoạt động tự động.`
-    );
-    return;
-  }
+//   // Khởi tạo instance cho genAI và scraper
+//   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+//   const scraper = new Scraper();
 
-  // Khởi tạo instance cho genAI và scraper
+//   // Lưu scraper vào biến global để sử dụng ở các hàm khác
+//   global.scraper = scraper;
+
+//   // Thông tin đăng nhập Twitter từ .env
+//   const username = process.env.TWITTER_USERNAME || "";
+//   const password = process.env.TWITTER_PASSWORD || "";
+//   const email = process.env.TWITTER_EMAIL || "";
+//   const fa = process.env.TWITTER_2FA_SECRET || "";
+
+//   console.log("Bắt đầu quá trình xử lý...");
+
+//   // Đăng nhập Twitter
+//   const loggedIn = await login(scraper, username, password, email, fa);
+//   if (!loggedIn) {
+//     console.error("Không thể đăng nhập vào Twitter. Đang dừng chương trình...");
+//     return;
+//   }
+
+//   // Reply tweet và lấy kết quả trả về
+//   console.log("Đang chạy replyTweet...");
+//   const result = await replyTweet(genAI, scraper, username);
+//   const replyTweets = result.tweets;
+
+//   // Chỉ kiểm tra tweet thread và retweet nếu đã reply một tweet mới
+//   if (result.repliedNewTweet && result.repliedTweetInfo) {
+//     console.log("Đã reply tweet mới, tiếp tục kiểm tra retweet...");
+
+//     // Lấy thông tin từ tweet đã reply
+//     const conversationId = result.repliedTweetInfo.conversationId;
+
+//     if (conversationId) {
+//       console.log("Xử lý conversationId:", conversationId);
+
+//       // Lấy tweet gốc từ conversationId
+//       const originalTweet = await scraper.getTweet(conversationId);
+
+//       if (originalTweet && originalTweet.id) {
+//         console.log("ID của tweet gốc:", originalTweet.id);
+//         // Sử dụng ID của tweet gốc để lấy thread
+//         await getTweetDetail(originalTweet.id);
+//       } else {
+//         console.log("Sử dụng conversation ID để lấy thread...");
+//         await getTweetDetail(conversationId);
+//       }
+//     } else {
+//       console.log("Không có conversationId, bỏ qua kiểm tra retweet.");
+//     }
+//   } else if (replyTweets.length > 0) {
+//     // Không có tweet mới nào được reply, nhưng vẫn có tweets
+//     console.log("Không có tweet mới nào được reply, bỏ qua kiểm tra retweet.");
+//   } else {
+//     console.log("Không có tweet nào để xử lý.");
+//   }
+// }
+
+// main().catch((error) => {
+//   console.error("Lỗi trong quá trình thực thi:", error);
+// });
+
+// ==== THAY main() THÀNH loopForever() ====
+
+async function loopForever() {
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
   const scraper = new Scraper();
-
-  // Lưu scraper vào biến global để sử dụng ở các hàm khác
   global.scraper = scraper;
 
-  // Thông tin đăng nhập Twitter từ .env
   const username = process.env.TWITTER_USERNAME || "";
   const password = process.env.TWITTER_PASSWORD || "";
   const email = process.env.TWITTER_EMAIL || "";
   const fa = process.env.TWITTER_2FA_SECRET || "";
 
-  console.log("Bắt đầu quá trình xử lý...");
-
-  // Đăng nhập Twitter
+  // Chỉ đăng nhập 1 lần
   const loggedIn = await login(scraper, username, password, email, fa);
   if (!loggedIn) {
-    console.error("Không thể đăng nhập vào Twitter. Đang dừng chương trình...");
+    console.error("Không thể đăng nhập. Dừng bot.");
     return;
   }
 
-  // Nếu chỉ chạy ở chế độ kiểm tra, chỉ fetch tweets và kiểm tra xem có tweet mới không
-  if (isCheckOnly) {
-    console.log("Chế độ kiểm tra: Chỉ fetch tweets và cập nhật files");
-    await replyTweet(genAI, scraper, username);
-    return;
-  }
+  console.log("✅ Đăng nhập thành công. Bắt đầu theo dõi tweet mới...");
 
-  // Reply tweet và lấy kết quả trả về
-  console.log("Đang chạy replyTweet...");
-  const result = await replyTweet(genAI, scraper, username);
-  const replyTweets = result.tweets;
-
-  // Chỉ kiểm tra tweet thread và retweet nếu đã reply một tweet mới
-  if (result.repliedNewTweet && result.repliedTweetInfo) {
-    console.log("Đã reply tweet mới, tiếp tục kiểm tra retweet...");
-
-    // Lấy thông tin từ tweet đã reply
-    const conversationId = result.repliedTweetInfo.conversationId;
-
-    if (conversationId) {
-      console.log("Xử lý conversationId:", conversationId);
-
-      // Lấy tweet gốc từ conversationId
-      const originalTweet = await scraper.getTweet(conversationId);
-
-      if (originalTweet && originalTweet.id) {
-        console.log("ID của tweet gốc:", originalTweet.id);
-        // Sử dụng ID của tweet gốc để lấy thread
-        await getTweetDetail(originalTweet.id);
-      } else {
-        console.log("Sử dụng conversation ID để lấy thread...");
-        await getTweetDetail(conversationId);
-      }
-    } else {
-      console.log("Không có conversationId, bỏ qua kiểm tra retweet.");
+  while (true) {
+    const currentHour = new Date().getHours();
+    if (currentHour >= 1 && currentHour <= 5) {
+      console.log("🌙 Đang trong giờ nghỉ (1–5h sáng), chờ 30 phút...");
+      await randomSleep(30 * 60 * 1000, 30 * 60 * 1000); // 30 phút nghỉ
+      continue;
     }
-  } else if (replyTweets.length > 0) {
-    // Không có tweet mới nào được reply, nhưng vẫn có tweets
-    console.log("Không có tweet mới nào được reply, bỏ qua kiểm tra retweet.");
-  } else {
-    console.log("Không có tweet nào để xử lý.");
+
+    try {
+      const result = await replyTweet(genAI, scraper, username);
+      const replyTweets = result.tweets;
+
+      if (result.repliedNewTweet && result.repliedTweetInfo) {
+        console.log("📬 Có tweet mới được reply, kiểm tra thread & retweet...");
+
+        const conversationId = result.repliedTweetInfo.conversationId;
+        if (conversationId) {
+          const originalTweet = await scraper.getTweet(conversationId);
+          const rootId = originalTweet?.id || conversationId;
+          await getTweetDetail(rootId);
+        }
+      } else {
+        console.log("⏳ Không có tweet mới, chờ 2 phút rồi kiểm tra lại...");
+      }
+    } catch (err) {
+      console.error("❌ Lỗi trong quá trình xử lý vòng lặp:", err);
+    }
+
+    // Nghỉ giữa mỗi lần check tweet để tránh spam
+    await randomSleep(2 * 60 * 1000, 3 * 60 * 1000); // 2–3 phút
   }
 }
 
-main().catch((error) => {
-  console.error("Lỗi trong quá trình thực thi:", error);
+// ==== KHỞI ĐỘNG BOT ====
+
+loopForever().catch((error) => {
+  console.error("Bot gặp lỗi không mong muốn:", error);
 });
