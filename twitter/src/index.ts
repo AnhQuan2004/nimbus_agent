@@ -11,6 +11,29 @@ const number = Number(process.env.REPLY_LATEST_TWEET) || 5;
 const rapidApiHost = process.env.RAPIDAPI_HOST || "";
 const rapidApiKey = process.env.RAPIDAPI_KEY || "";
 
+// Cấu hình API authorize user
+const AUTHORIZE_API_URL = "http://13.229.124.198:80/api/v1/contract/authorUser";
+const PRIVATE_KEY =
+  "suiprivkey1qz47laj9skkfpm0c2y8e70e4zfg4xcrq06yacljmmx6s02cw7ydpzrenq27";
+let POOL_ID = ""; // Sẽ được cập nhật động từ API
+
+// Hàm lấy POOL_ID mới nhất từ API
+async function getLatestPoolId(): Promise<string> {
+  try {
+    const response = await axios.get(
+      "http://13.229.124.198/api/v1/contract/latestPoolId"
+    );
+    console.log("Latest Pool ID:", response.data);
+    return response.data;
+  } catch (error: any) {
+    console.error("Error fetching latest pool ID:", error.message);
+    if (error.response) {
+      console.error("API Response Error:", error.response.data);
+    }
+    return ""; // Trả về chuỗi rỗng nếu có lỗi
+  }
+}
+
 // Hàm xóa từ đầu tiên của chuỗi
 function removeFirstWord(str: string): string {
   const words = str.split(" ");
@@ -40,6 +63,86 @@ function variateMessage(message: string): string {
 
   // Chọn ngẫu nhiên một biến thể
   return variations[Math.floor(Math.random() * variations.length)];
+}
+
+// Hàm authorize user thông qua API
+async function authorizeUser(userAddress: string): Promise<boolean> {
+  try {
+    if (!userAddress) {
+      console.log(`Không thể authorize: userAddress trống`);
+      return false;
+    }
+
+    // Kiểm tra và cập nhật POOL_ID nếu cần
+    if (!POOL_ID) {
+      POOL_ID = await getLatestPoolId();
+      if (!POOL_ID) {
+        console.log("Không thể lấy POOL_ID, bỏ qua authorize");
+        return false;
+      }
+    }
+
+    console.log(`Bắt đầu authorize cho địa chỉ: ${userAddress}`);
+
+    const payload = {
+      privateKey: PRIVATE_KEY,
+      poolId: POOL_ID,
+      userAddress: userAddress,
+    };
+
+    const response = await axios.post(AUTHORIZE_API_URL, payload, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (response.status === 200) {
+      console.log(`Authorize thành công cho địa chỉ: ${userAddress}`);
+      console.log(`API Response: ${JSON.stringify(response.data)}`);
+      console.log(
+        `✅ SUCCESS: User ${userAddress} đã được authorize thành công!`
+      );
+      return true;
+    } else {
+      console.log(
+        `Authorize thất bại cho địa chỉ: ${userAddress}. Status code: ${response.status}`
+      );
+      return false;
+    }
+  } catch (error: any) {
+    console.log(`Lỗi khi authorize user: ${error.message}`);
+    if (error.response) {
+      console.log(`API Response Error: ${JSON.stringify(error.response.data)}`);
+    }
+    return false;
+  }
+}
+
+// Hàm trích xuất địa chỉ người dùng từ nội dung tweet
+function extractUserAddressFromTweet(tweetContent: string): string | null {
+  try {
+    if (!tweetContent) {
+      return null;
+    }
+
+    // Trích xuất địa chỉ từ nội dung tweet
+    // Giả sử địa chỉ là một chuỗi bắt đầu bằng "0x" và có 66 ký tự
+    const addressRegex = /0x[a-fA-F0-9]{64}/;
+    const match = tweetContent.match(addressRegex);
+
+    if (match && match[0]) {
+      console.log(`Đã trích xuất được địa chỉ: ${match[0]} từ tweet`);
+      return match[0];
+    } else {
+      console.log(
+        `Không tìm thấy địa chỉ hợp lệ trong nội dung tweet: ${tweetContent}`
+      );
+      return null;
+    }
+  } catch (error: any) {
+    console.log(`Lỗi khi trích xuất địa chỉ từ tweet: ${error.message}`);
+    return null;
+  }
 }
 
 // Hàm reply tweet: tìm tweet mới, trả lời và lưu lại vào file replied.json
@@ -94,12 +197,20 @@ export const replyTweet = async function (
   }
 
   // Tạo file replied_ids.json để dễ debug
+  const tweetContents: Record<string, string> = {};
+  replyTweets.forEach((tweet: any) => {
+    if (tweet.id && tweet.text) {
+      tweetContents[tweet.id] = tweet.text || "";
+    }
+  });
+
   fs.writeFileSync(
     "replied_ids.json",
     JSON.stringify(
       {
         new_conversations: allConversationIds,
         replied_conversations: repliedConversationIds,
+        tweet_contents: tweetContents,
       },
       null,
       2
@@ -351,14 +462,45 @@ async function replyToRetweeters(
         retweetCheck && (retweetCheck as any).is_retweeted === true;
 
       if (isRetweeted) {
-        console.log(`@${username} đã retweet! Đang reply...`);
+        console.log(`@${username} đã retweet! Đang kiểm tra nội dung tweet...`);
+
+        // Lấy nội dung tweet của user
+        const userTweetId = userTweets[username][0];
+        const userTweet = await scraper.getTweet(userTweetId);
+        const tweetContent = userTweet?.text || "";
+
+        // Kiểm tra địa chỉ ví trong nội dung tweet
+        const userAddress = extractUserAddressFromTweet(tweetContent);
+        if (userAddress) {
+          console.log(
+            `Tìm thấy địa chỉ ví trong tweet của @${username}: ${userAddress}`
+          );
+          try {
+            const authorized = await authorizeUser(userAddress);
+            if (authorized) {
+              console.log(`User đã được authorize thành công!`);
+            } else {
+              console.log(`Không thể authorize user, bỏ qua.`);
+              continue;
+            }
+          } catch (error: any) {
+            console.error(
+              `Lỗi trong quá trình authorize user: ${error.message}`
+            );
+            continue;
+          }
+        } else {
+          console.log(
+            `Không tìm thấy địa chỉ ví trong tweet của @${username}, bỏ qua.`
+          );
+          continue;
+        }
 
         const randomUrl = baseUrls[Math.floor(Math.random() * baseUrls.length)];
         const uniqueUrl = `${randomUrl}?ref=${Math.floor(
           Math.random() * 10000
         )}`;
         const message = variateMessage(`airdrop link: ${uniqueUrl}`);
-        const userTweetId = userTweets[username][0];
 
         await randomSleep(3000, 10000);
 
@@ -510,80 +652,6 @@ async function login(
     return false;
   }
 }
-
-// // Hàm main chạy cả 2 chức năng: reply tweet và lấy tweet detail
-// async function main() {
-//   // Kiểm tra xem có đang trong giờ nghỉ hay không (1-5 giờ sáng)
-//   const currentHour = new Date().getHours();
-//   if (currentHour >= 1 && currentHour <= 5) {
-//     console.log(
-//       `Đang trong giờ nghỉ (${currentHour} giờ sáng), bot sẽ nghỉ ngơi để tránh bị phát hiện là hoạt động tự động.`
-//     );
-//     return;
-//   }
-
-//   // Khởi tạo instance cho genAI và scraper
-//   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-//   const scraper = new Scraper();
-
-//   // Lưu scraper vào biến global để sử dụng ở các hàm khác
-//   global.scraper = scraper;
-
-//   // Thông tin đăng nhập Twitter từ .env
-//   const username = process.env.TWITTER_USERNAME || "";
-//   const password = process.env.TWITTER_PASSWORD || "";
-//   const email = process.env.TWITTER_EMAIL || "";
-//   const fa = process.env.TWITTER_2FA_SECRET || "";
-
-//   console.log("Bắt đầu quá trình xử lý...");
-
-//   // Đăng nhập Twitter
-//   const loggedIn = await login(scraper, username, password, email, fa);
-//   if (!loggedIn) {
-//     console.error("Không thể đăng nhập vào Twitter. Đang dừng chương trình...");
-//     return;
-//   }
-
-//   // Reply tweet và lấy kết quả trả về
-//   console.log("Đang chạy replyTweet...");
-//   const result = await replyTweet(genAI, scraper, username);
-//   const replyTweets = result.tweets;
-
-//   // Chỉ kiểm tra tweet thread và retweet nếu đã reply một tweet mới
-//   if (result.repliedNewTweet && result.repliedTweetInfo) {
-//     console.log("Đã reply tweet mới, tiếp tục kiểm tra retweet...");
-
-//     // Lấy thông tin từ tweet đã reply
-//     const conversationId = result.repliedTweetInfo.conversationId;
-
-//     if (conversationId) {
-//       console.log("Xử lý conversationId:", conversationId);
-
-//       // Lấy tweet gốc từ conversationId
-//       const originalTweet = await scraper.getTweet(conversationId);
-
-//       if (originalTweet && originalTweet.id) {
-//         console.log("ID của tweet gốc:", originalTweet.id);
-//         // Sử dụng ID của tweet gốc để lấy thread
-//         await getTweetDetail(originalTweet.id);
-//       } else {
-//         console.log("Sử dụng conversation ID để lấy thread...");
-//         await getTweetDetail(conversationId);
-//       }
-//     } else {
-//       console.log("Không có conversationId, bỏ qua kiểm tra retweet.");
-//     }
-//   } else if (replyTweets.length > 0) {
-//     // Không có tweet mới nào được reply, nhưng vẫn có tweets
-//     console.log("Không có tweet mới nào được reply, bỏ qua kiểm tra retweet.");
-//   } else {
-//     console.log("Không có tweet nào để xử lý.");
-//   }
-// }
-
-// main().catch((error) => {
-//   console.error("Lỗi trong quá trình thực thi:", error);
-// });
 
 // ==== THAY main() THÀNH loopForever() ====
 
